@@ -1,0 +1,28 @@
+{
+  "name": "dsh-tietiezhi",
+  "version": "0.2.0",
+  "repository": { "type": "git", "url": "https://github.com/tietiezhi-1216/dsh-tietiezhi.git" },
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.19.0", "dsh": "0.2.2-rc.3" },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./permanent-delete": "./features/permanent-delete/host.js",
+    "./permanent-delete/locale/*.json": "./features/permanent-delete/locale/*.json",
+    "./permanent-delete/icon": "./icon.svg"
+  },
+  "files": ["index.js", "client.js", "features/", "cordis.patch.yml", "locale/", "icon.svg"],
+  "scripts": { "test": "node --test", "check": "node --check client.js && node --check index.js && node --test" },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-workspace", "@deepseek-ai/dsh-client-ui-context-menu", "@deepseek-ai/dsh-client-locale"]
+    }
+  }
+}

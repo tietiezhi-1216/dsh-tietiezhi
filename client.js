@@ -1,0 +1,136 @@
+window.__ModuleLoader__.load({
+  id: 'dsh-tietiezhi',
+  factory(require) {
+    const { createElement: h, useEffect, useRef, useSyncExternalStore } = require('react');
+    const ns = 'dsh-tietiezhi';
+    const deleteRoute = 'api/dsh-tietiezhi/permanent-delete';
+    async function deletionEnabled(signal) {
+      try {
+        const response = await fetch(`${deleteRoute}/status`, { signal, mode: 'same-origin', credentials: 'same-origin', cache: 'no-store', redirect: 'error' });
+        return response.ok && (await response.json()).enabled === true;
+      } catch { return false; }
+    }
+    const en = {
+      delete: 'Delete permanently', cancel: 'Cancel', close: 'Close', busy: 'Deleting…', untitled: 'Untitled conversation',
+      warning: 'This permanently deletes the conversation history. It cannot be undone. Workspace files and shared attachments are not deleted.',
+      success: 'Conversation deleted permanently.', unavailable: 'Permanent deletion is off or unavailable.',
+      active: 'This conversation is still in use. Close it in all open windows, then try again.',
+      dependent: 'Another conversation depends on this record. Delete the dependent conversation first.',
+      unsupported: 'This conversation’s storage or backend is not supported for deletion.',
+      missing: 'The conversation no longer exists.',
+      concurrent: 'A deletion is already in progress. Try again when it finishes.',
+      partial: 'Cleanup did not finish. Check the Harness host logs before retrying.',
+      failed: 'Could not confirm deletion. Refresh the list and check the conversation before retrying.',
+    };
+    const zh = {
+      delete: '永久删除', cancel: '取消', close: '关闭', busy: '正在删除…', untitled: '未命名对话',
+      warning: '此操作会永久删除对话记录，无法撤销。工作区文件和共享附件不会被删除。',
+      success: '对话已永久删除。', unavailable: '永久删除已关闭或暂不可用。', active: '此对话仍在使用。请在所有窗口中关闭它，再重试。',
+      dependent: '其他对话依赖这条记录。请先处理依赖它的对话。',
+      unsupported: '暂不支持删除此对话的存储格式或后端。', missing: '此对话已不存在。',
+      concurrent: '正在处理另一项删除，请稍后重试。', partial: '清理未完成。请先查看 Harness 宿主日志再重试。',
+      failed: '无法确认删除结果。请刷新列表确认对话状态，再决定是否重试。',
+    };
+    const icon = () => h('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+      h('path', { d: 'M2.5 4.5h11m-8 0V3h5v1.5m1.5 0-.65 8.2a1 1 0 0 1-1 .8h-4.7a1 1 0 0 1-1-.8L4 4.5m2.5 2.2v4.4m3-4.4v4.4', stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round', strokeLinejoin: 'round' }));
+    const css = `
+      .ttz-delete-dialog { pointer-events:auto; box-sizing:border-box; width:min(440px, calc(100vw - 32px)); max-height:calc(100vh - 32px); overflow:auto; padding:20px; border:1px solid var(--dsw-alias-border-l1); border-radius:12px; background:var(--dsw-alias-bg-overlay); color:var(--dsw-alias-label-primary); font:inherit; }
+      .ttz-delete-dialog::backdrop { background:color-mix(in srgb, var(--dsw-alias-bg-base) 60%, transparent); }
+      .ttz-delete-dialog h2 { margin:0; font-size:17px; }
+      .ttz-delete-dialog p { margin:10px 0; overflow-wrap:anywhere; }
+      .ttz-delete-warning { color:var(--dsw-alias-label-secondary); }
+      .ttz-delete-error { color:var(--dsw-alias-state-error-primary); }
+      .ttz-delete-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:8px; margin-top:18px; }
+      .ttz-delete-actions button { font:inherit; padding:6px 12px; border:1px solid var(--dsw-alias-border-l2); border-radius:8px; background:var(--dsw-alias-bg-layer-1); color:inherit; }
+      .ttz-delete-actions button:not(:disabled):hover { background:var(--dsw-alias-bg-layer-2); }
+      .ttz-delete-actions button:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:2px; }
+      .ttz-delete-actions button.ttz-delete-confirm { color:var(--dsw-alias-state-error-primary); border-color:currentColor; }
+      .ttz-delete-actions button:disabled { opacity:.6; }
+    `;
+    function apply(ctx) {
+      const menus = ctx.contextMenus;
+      ctx.effect(() => ctx.locale.register(ns, { en, zh, ja: en, es: en, fr: en, de: en, ru: en, pt: en }));
+      const t = ctx.locale.bind(ns);
+      let state = null;
+      let disposed = false;
+      const listeners = new Set();
+      const subscribe = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
+      const snapshot = () => state;
+      const publish = (next) => { state = next; for (const fn of listeners) fn(); };
+      ctx.effect(() => () => { disposed = true; });
+
+      async function remove() {
+        if (disposed || !state || state.busy) return;
+        const target = state.target;
+        publish({ target, busy: true });
+        let error = 'failed';
+        try {
+          if (!await deletionEnabled(AbortSignal.timeout(4000))) {
+            if (!disposed) publish({ target, error: 'unavailable' });
+            return;
+          }
+          if (disposed) return;
+          const response = await fetch(deleteRoute, {
+            signal: AbortSignal.timeout(30000), method: 'POST', mode: 'same-origin', credentials: 'same-origin', redirect: 'error',
+            headers: { 'content-type': 'application/json', 'x-dsh-tietiezhi-action': 'delete-session' },
+            body: JSON.stringify({ sessionId: target.sessionId }),
+          });
+          const result = await response.json();
+          if (disposed) return;
+          if (response.ok && result.ok === true) {
+            publish(null);
+            menus.notify(t('success'), true);
+            return;
+          }
+          if (['active', 'dependent', 'unsupported', 'missing', 'concurrent', 'partial'].includes(result.code)) error = result.code;
+        } catch { /* Network failure does not prove that deletion failed. */ }
+        if (!disposed) publish({ target, error });
+      }
+
+      function ConfirmDialog() {
+        const current = useSyncExternalStore(subscribe, snapshot);
+        useSyncExternalStore(ctx.locale.subscribe.bind(ctx.locale), ctx.locale.getSnapshot.bind(ctx.locale));
+        const dialog = useRef(null);
+        const hasTarget = current !== null;
+        useEffect(() => {
+          if (!hasTarget) return;
+          const element = dialog.current;
+          element.showModal();
+          return () => { if (element.open) element.close(); };
+        }, [hasTarget]);
+        if (!current) return null;
+        return h('dialog', {
+          ref: dialog, className: 'ttz-delete-dialog', 'aria-labelledby': 'ttz-delete-title', 'aria-describedby': 'ttz-delete-target ttz-delete-warning',
+          onCancel(event) { event.preventDefault(); if (!current.busy) publish(null); },
+        }, h('style', null, css),
+        h('h2', { id: 'ttz-delete-title' }, t('delete')),
+        h('p', { id: 'ttz-delete-target' }, h('strong', null, current.target.displayTitle || t('untitled'))),
+        h('p', { id: 'ttz-delete-warning', className: 'ttz-delete-warning' }, t('warning')),
+        current.error && h('p', { className: 'ttz-delete-error', role: 'alert' }, t(current.error)),
+        current.busy && h('p', { role: 'status' }, t('busy')),
+        h('div', { className: 'ttz-delete-actions' },
+          h('button', { type: 'button', autoFocus: true, disabled: current.busy, onClick: () => publish(null) }, t(!current.error ? 'cancel' : 'close')),
+          h('button', { type: 'button', className: 'ttz-delete-confirm', disabled: current.busy || ['partial', 'failed', 'missing'].includes(current.error), onClick: remove }, t('delete'))));
+      }
+      ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: `${ns}.delete-dialog` }, ConfirmDialog));
+      ctx.slots.inject('contextMenu.icon', () => ctx.slots.register({ name: 'contextMenu.icon', key: `${ns}.trash` }, icon));
+      ctx.effect(() => menus.register({
+        id: `${ns}.delete`, target: 'session', order: 700,
+        observe: (target) => [ctx.locale, ctx.remoteAccess.source('session', target.sessionId, 'workspace/archiveSession')],
+        async resolve(target, signal) {
+          if (!ctx.remoteAccess.source('session', target.sessionId, 'workspace/archiveSession').getSnapshot() || !await deletionEnabled(signal)) return [];
+          return [{
+            id: 'delete-permanently', label: t('delete'), icon: { key: `${ns}.trash` }, danger: true, separatorBefore: true, afterContent: true,
+            async run() {
+              const enabled = await deletionEnabled(AbortSignal.timeout(4000));
+              if (disposed || state) return;
+              if (enabled) publish({ target });
+              else menus.notify(t('unavailable'));
+            },
+          }];
+        },
+      }));
+    }
+    return { inject: ['contextMenus', 'locale', 'slots', 'remoteAccess'], apply };
+  },
+});

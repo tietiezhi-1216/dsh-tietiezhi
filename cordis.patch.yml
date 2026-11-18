@@ -1,0 +1,7 @@
+- insert:
+    - id: dsh-tietiezhi
+      name: dsh-tietiezhi
+      config: {}
+    - id: dsh-tietiezhi-permanent-delete
+      name: dsh-tietiezhi/permanent-delete
+      config: {}
