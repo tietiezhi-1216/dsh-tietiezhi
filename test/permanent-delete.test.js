@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm, symlink, ls
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { apply, createDeletion, createHandler } from '../features/permanent-delete/host.js';
+import { registerPermanentDelete, createDeletion, createHandler } from '../features/permanent-delete/host.js';
 
 async function fixture(t) {
   const base = await realpath(tmpdir());
@@ -88,6 +88,18 @@ test('lease contention and repeated submission do not modify storage', async (t)
   assert.equal(await readFile(f.log, 'utf8'), 'unchanged');
 });
 
+test('disabling deletion during preflight leaves the log and metadata untouched', async (t) => {
+  const f = await fixture(t);
+  let enabled = true;
+  f.ctx.sessionPersistence.list = async () => {
+    enabled = false;
+    return [f.snapshot];
+  };
+  assert.deepEqual(await createDeletion(f.ctx, () => enabled)('target'), { ok: false, code: 'unavailable' });
+  assert.equal(await readFile(f.log, 'utf8'), 'unchanged');
+  assert.deepEqual(f.events.map(([event]) => event), ['lock', 'unlock']);
+});
+
 test('metadata cleanup failure is surfaced, not reported as success', async (t) => {
   const f = await fixture(t);
   f.ctx.workspaceRegistry.unpinSession = async () => { throw new Error('test failure'); };
@@ -96,28 +108,38 @@ test('metadata cleanup failure is surfaced, not reported as success', async (t) 
   assert.equal(await readFile(f.siblingLog, 'utf8'), 'unchanged');
 });
 
-test('endpoint requires the authenticated browser peer, same authority and action header', async () => {
+test('endpoint admits Desktop forwarding and rejects unauthenticated or cross-origin requests', async () => {
   const browserPeer = { id: 'browser' };
   let peer = browserPeer;
   const calls = [];
   const handle = createHandler({ browserPeer, admit: () => ({ peer }) }, async (id) => { calls.push(id); return { ok: true }; });
-  const request = (headers = {}, body = '{"sessionId":"target"}') => new Request('http://dsh.internal/api/dsh-tietiezhi/permanent-delete', {
-    method: 'POST', headers: { host: '127.0.0.1:59580', origin: 'http://127.0.0.1:59580', 'content-type': 'application/json',
-      'x-dsh-tietiezhi-action': 'delete-session', ...headers }, body,
-  });
+  const request = (extra = {}, body = '{"sessionId":"target"}') => {
+    const headers = new Headers({ host: '127.0.0.1:59580', origin: 'http://127.0.0.1:59580', 'content-type': 'application/json', 'x-dsh-tietiezhi-action': 'delete-session' });
+    for (const [key, value] of Object.entries(extra)) value === null ? headers.delete(key) : headers.set(key, value);
+    return new Request('http://dsh.internal/api/dsh-tietiezhi/permanent-delete', { method: 'POST', headers, body });
+  };
   assert.equal((await handle(request({ origin: 'http://127.0.0.1:1111' }))).status, 403);
+  assert.equal((await handle(request({ origin: 'null' }))).status, 403);
+  assert.equal((await handle(request({ host: null, origin: null }))).status, 403);
+  assert.equal((await handle(request({ origin: null, 'sec-fetch-site': 'cross-site' }))).status, 403);
+  assert.equal((await handle(request({ origin: null, 'x-dsh-tietiezhi-action': '' }))).status, 403);
   assert.equal((await handle(request({ 'x-dsh-tietiezhi-action': '' }))).status, 403);
   assert.equal((await handle(request({}, ' '.repeat(1025)))).status, 413);
   assert.equal((await handle(request({}, '{bad'))).status, 400);
   peer = { id: 'api' };
   assert.equal((await handle(request())).status, 403);
+  assert.equal((await handle(request({ origin: null }))).status, 403);
+  peer = undefined;
+  assert.equal((await handle(request({ origin: null }))).status, 403);
   peer = browserPeer;
   assert.equal((await handle(request())).status, 200);
-  assert.deepEqual(calls, ['target']);
+  assert.equal((await handle(request({ origin: null }))).status, 200);
+  assert.deepEqual(calls, ['target', 'target']);
 });
 
-test('enabling the feature registers status and deletion, disabling withdraws both', async (t) => {
-  const { ctx } = await fixture(t);
+test('the feature switch rejects a direct deletion request while off', async (t) => {
+  const { ctx, log, events } = await fixture(t);
+  let enabled = false;
   const routes = new Map();
   const disposers = [];
   const browserPeer = { id: 'browser' };
@@ -130,12 +152,22 @@ test('enabling the feature registers status and deletion, disabling withdraws bo
     } },
   };
   ctx.effect = (register) => disposers.push(register());
-  apply(ctx);
+  registerPermanentDelete(ctx, () => enabled);
   const base = '/api/dsh-tietiezhi/permanent-delete';
   assert.deepEqual(routes.get(base).methods, ['POST']);
   const probe = routes.get(`${base}/status`);
   assert.deepEqual(probe.methods, ['GET']);
-  assert.deepEqual(await (await probe.fetch(new Request(`http://dsh.internal${probe.path}`))).json(), { ok: true, enabled: true });
+  const readStatus = () => probe.fetch(new Request(`http://dsh.internal${probe.path}`));
+  assert.deepEqual(await (await readStatus()).json(), { ok: true, enabled: false });
+  const post = new Request(`http://dsh.internal${base}`, {
+    method: 'POST', headers: { host: 'localhost', origin: 'http://localhost', 'content-type': 'application/json', 'x-dsh-tietiezhi-action': 'delete-session' },
+    body: '{"sessionId":"target"}',
+  });
+  assert.deepEqual(await (await routes.get(base).fetch(post)).json(), { ok: false, code: 'unavailable' });
+  assert.equal(await readFile(log, 'utf8'), 'unchanged');
+  assert.deepEqual(events, []);
+  enabled = true;
+  assert.deepEqual(await (await readStatus()).json(), { ok: true, enabled: true });
   peer = undefined;
   assert.equal((await probe.fetch(new Request(`http://dsh.internal${probe.path}`))).status, 403);
   for (const dispose of disposers) await dispose();

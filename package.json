@@ -1,6 +1,6 @@
 {
   "name": "dsh-tietiezhi",
-  "version": "0.2.0",
+  "version": "0.4.1",
   "repository": { "type": "git", "url": "https://github.com/tietiezhi-1216/dsh-tietiezhi.git" },
   "private": true,
   "type": "module",
@@ -15,8 +15,8 @@
     "./permanent-delete/locale/*.json": "./features/permanent-delete/locale/*.json",
     "./permanent-delete/icon": "./icon.svg"
   },
-  "files": ["index.js", "client.js", "features/", "cordis.patch.yml", "locale/", "icon.svg"],
-  "scripts": { "test": "node --test", "check": "node --check client.js && node --check index.js && node --test" },
+  "files": ["index.js", "client.js", "features/permanent-delete/host.js", "features/permanent-delete/locale/", "cordis.patch.yml", "locale/", "icon.svg"],
+  "scripts": { "build": "node scripts/build-client.js", "test": "node --test", "check": "node scripts/build-client.js --check && node --check client.js && node --check index.js && node --test" },
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {

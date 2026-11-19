@@ -6,7 +6,7 @@ const route = '/api/dsh-tietiezhi/permanent-delete';
 const SESSION_ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const LOG_NAME = /^session(?:\.v[1-9][0-9]*)?\.jsonl(?:\.zstd)?$/;
 const LIMIT = 1024;
-const status = { invalid: 400, forbidden: 403, missing: 404, active: 409, dependent: 409, concurrent: 409, large: 413, unsupported: 422, failed: 500, partial: 500 };
+const status = { invalid: 400, forbidden: 403, missing: 404, unavailable: 409, active: 409, dependent: 409, concurrent: 409, large: 413, unsupported: 422, failed: 500, partial: 500 };
 class Refusal extends Error { constructor(code) { super(code); this.code = code; } }
 const reject = (code) => { throw new Refusal(code); };
 const same = (a, b) => a.ino === b.ino && a.dev === b.dev && a.birthtimeNs === b.birthtimeNs;
@@ -32,9 +32,10 @@ async function locate(persistence, snapshot, id) {
 }
 
 /** Single confirmed operation, with no agent tool or generic filesystem endpoint. */
-export function createDeletion(ctx) {
+export function createDeletion(ctx, enabled = () => true) {
   let busy = false;
   return async (id, signal) => {
+    if (!enabled()) return { ok: false, code: 'unavailable' };
     if (typeof id !== 'string' || !SESSION_ID.test(id)) return { ok: false, code: 'invalid' };
     if (busy) return { ok: false, code: 'concurrent' };
     busy = true;
@@ -72,6 +73,7 @@ export function createDeletion(ctx) {
       const check = await locate(persistence, latest, id);
       if (live() || !same(check.dirStat, location.dirStat) || !same(check.fileStat, location.fileStat)) reject('active');
       signal?.throwIfAborted();
+      if (!enabled()) reject('unavailable');
       await rename(location.dir, staged);
       renamed = true;
       if (!same(await identity(staged), location.dirStat) || await realpath(staged) !== staged ||
@@ -113,16 +115,22 @@ const json = (result) => Response.json(result, { status: result.ok ? 200 : statu
 
 export function createHandler(connection, remove) {
   return async (request) => {
-    // Connection already checks Host, Origin and the signed credential. Require the browser peer,
-    // an explicit same-authority origin, and a non-form request header for this destructive route.
+    // Connection checks Host/Origin and the signed credential. Desktop forwarding deliberately
+    // strips Origin, so require the authenticated browser peer and a non-form action header;
+    // validate same-authority Origin when supplied, rather than rejecting the Desktop carrier.
     const origin = request.headers.get('origin');
     const host = request.headers.get('host');
     const admission = connection.admit({ headers: request.headers });
     if (request.method !== 'POST' || admission.peer?.id !== connection.browserPeer.id ||
-        !origin || !host || request.headers.get('x-dsh-tietiezhi-action') !== 'delete-session') return json({ ok: false, code: 'forbidden' });
+        !host || request.headers.get('sec-fetch-site') === 'cross-site' ||
+        request.headers.get('x-dsh-tietiezhi-action') !== 'delete-session') return json({ ok: false, code: 'forbidden' });
+    if (origin !== null) {
+      try {
+        const url = new URL(origin);
+        if (!['http:', 'https:'].includes(url.protocol) || origin !== url.origin || new URL(`${url.protocol}//${host}`).origin !== origin) reject('forbidden');
+      } catch { return json({ ok: false, code: 'forbidden' }); }
+    }
     try {
-      const url = new URL(origin);
-      if (!['http:', 'https:'].includes(url.protocol) || origin !== url.origin || new URL(`${url.protocol}//${host}`).origin !== origin) reject('forbidden');
       if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json' || !request.body) reject('invalid');
       const reader = request.body.getReader();
       let body = '';
@@ -148,7 +156,13 @@ export function createHandler(connection, remove) {
 }
 
 export function apply(ctx) {
-  const remove = createDeletion(ctx);
+  let active = true;
+  registerPermanentDelete(ctx, () => active);
+  ctx.effect(() => () => { active = false; }, 'dsh-tietiezhi: close deletion gate');
+}
+
+export function registerPermanentDelete(ctx, enabled) {
+  const remove = createDeletion(ctx, enabled);
   const connection = ctx.connection;
   ctx.effect(() => connection.fetch.register({
     path: route, methods: ['POST'], requestBody: 'streaming',
@@ -158,7 +172,7 @@ export function apply(ctx) {
     path: `${route}/status`, methods: ['GET'], requestBody: 'buffered',
     fetch: async (request) => {
       const { peer } = connection.admit({ headers: request.headers });
-      return peer?.id === connection.browserPeer.id ? json({ ok: true, enabled: true }) : json({ ok: false, code: 'forbidden' });
+      return peer?.id === connection.browserPeer.id ? json({ ok: true, enabled: enabled() }) : json({ ok: false, code: 'forbidden' });
     },
   }), 'dsh-tietiezhi: permanent delete status');
 }
